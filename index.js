@@ -124,7 +124,7 @@ app.post('/login', async (req, res) => {
 });
 
 /* ========================================================
-   3. CONSULTAR SALDO
+   3. CONSULTAR SALDO (ESSA É A ROTA QUE ESTAVA FALTANDO!)
 ======================================================== */
 app.get('/saldo/:id', async (req, res) => {
   try {
@@ -145,10 +145,10 @@ app.get('/saldo/:id', async (req, res) => {
 });
 
 /* ========================================================
-   4. INICIAR JOGO (NOVO! - Desconta Vida)
+   4. INICIAR JOGO (Desconta Vida)
 ======================================================== */
 app.post('/jogo/inicio', async (req, res) => {
-  const { usuario_id, jogo } = req.body; // ex: { usuario_id: 1, jogo: "nave" }
+  const { usuario_id, jogo } = req.body;
 
   try {
     // Tenta descontar 1 vida APENAS SE vidas > 0
@@ -159,14 +159,12 @@ app.post('/jogo/inicio', async (req, res) => {
 
     // Se não retornou nada, é porque não tinha vidas ou usuário não existe
     if (result.rows.length === 0) {
-        // Verifica se usuário existe só pra dar a msg certa
         const check = await pool.query('SELECT id FROM usuarios WHERE id = $1', [usuario_id]);
         if (check.rows.length === 0) return res.status(404).json({ erro: 'Usuário não existe.' });
         
         return res.status(403).json({ erro: 'Sem vidas para jogar! Espere recarregar.' });
     }
 
-    // Sucesso: Retorna quantas vidas sobraram
     res.json({ 
         mensagem: 'Jogo iniciado! Boa sorte.', 
         vidas_restantes: result.rows[0].vidas 
@@ -185,19 +183,16 @@ app.post('/pontuacao', async (req, res) => {
   const { usuario_id, jogo, pontos } = req.body;
   const pontosNum = parseInt(pontos) || 0;
   
-  // Exemplo: Ganha 1 diamante a cada 100 pontos
   const diamantesGanhos = Math.floor(pontosNum / 100);
 
   try {
     await pool.query('BEGIN');
 
-    // 1. Registra no histórico
     await pool.query(
       'INSERT INTO historico_jogos (usuario_id, jogo, pontos) VALUES ($1, $2, $3)',
       [usuario_id, jogo, pontosNum]
     );
 
-    // 2. Dá os prêmios (Diamantes e XP)
     await pool.query(
       'UPDATE usuarios SET diamantes = diamantes + $1, xp = xp + $2 WHERE id = $3',
       [diamantesGanhos, pontosNum, usuario_id]
@@ -318,14 +313,11 @@ app.post('/sacar', async (req, res) => {
     }
 
     await pool.query('BEGIN');
-
     await pool.query('UPDATE usuarios SET saldo = saldo - $1 WHERE id = $2', [valor, usuario_id]);
-
     await pool.query(
       'INSERT INTO saques (usuario_id, valor, chave_pix, status) VALUES ($1, $2, $3, $4)',
       [usuario_id, valor, chave_pix, 'em_analise']
     );
-
     await pool.query('COMMIT');
     res.json({ mensagem: 'Saque solicitado com sucesso! Aguarde aprovação.' });
 
