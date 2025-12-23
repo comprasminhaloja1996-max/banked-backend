@@ -7,80 +7,103 @@ const cors = require('cors');
 const app = express();
 
 /* ========================================================
-   CONFIGURAÇÕES
+   CONFIGURAÇÕES E MIDDLEWARES
 ======================================================== */
-app.use(cors());
+app.use(cors()); // Libera acesso para o App e Sites
 app.use(express.json());
 
 /* ========================================================
-   BANCO DE DADOS – NEON
+   CONEXÃO COM O BANCO DE DADOS (NEON)
 ======================================================== */
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: {
+    rejectUnauthorized: false // Obrigatório para conexões externas no Neon
+  }
 });
 
-pool.connect(err => {
-  if (err) console.error('❌ Erro banco:', err.message);
-  else console.log('✅ Banco Neon conectado');
+// Teste de conexão ao iniciar
+pool.connect((err) => {
+    if (err) {
+        console.error('❌ Erro ao conectar no Banco:', err.message);
+    } else {
+        console.log('✅ Conectado ao Banco Neon com sucesso!');
+    }
 });
 
 /* ========================================================
-   PING
+   ROTA DE TESTE (PING)
 ======================================================== */
-app.get('/', (_, res) => {
-  res.send('🚀 API Banked online');
+app.get('/', (req, res) => {
+  res.send('🚀 API Banked online e rodando!');
 });
 
 /* ========================================================
-   CADASTRO
+   1. CADASTRO DE USUÁRIO
 ======================================================== */
 app.post('/usuarios', async (req, res) => {
   try {
     const { nome, email, senha, celular, cpf } = req.body;
-    if (!nome || !email || !senha)
-      return res.status(400).json({ erro: 'Dados obrigatórios ausentes.' });
 
-    const check = await pool.query(
-      'SELECT id FROM usuarios WHERE email=$1 OR cpf=$2 OR celular=$3',
+    if (!nome || !email || !senha) {
+      return res.status(400).json({ erro: 'Dados obrigatórios ausentes.' });
+    }
+
+    // Regex de Senha Forte
+    const regexSenha = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[$*&@#])[0-9a-zA-Z$*&@#]{8,}$/;
+    if (!regexSenha.test(senha)) {
+      return res.status(400).json({
+        erro: 'Senha fraca: use 8 letras, 1 maiúscula, 1 minúscula e 1 símbolo.'
+      });
+    }
+
+    const checkUser = await pool.query(
+      'SELECT id FROM usuarios WHERE email = $1 OR cpf = $2 OR celular = $3',
       [email, cpf, celular]
     );
-    if (check.rows.length)
-      return res.status(409).json({ erro: 'Usuário já existe.' });
+
+    if (checkUser.rows.length > 0) {
+      return res.status(409).json({ erro: 'Usuário já cadastrado.' });
+    }
 
     const senhaHash = await bcrypt.hash(senha, 10);
 
-    const { rows } = await pool.query(`
-      INSERT INTO usuarios
-      (nome,email,senha_hash,celular,cpf,saldo,diamantes,vidas,xp,nivel)
-      VALUES ($1,$2,$3,$4,$5,0,20,5,0,1)
-      RETURNING id,nome,email,saldo,diamantes,vidas,xp,nivel
-    `, [nome, email, senhaHash, celular, cpf]);
+    const query = `
+      INSERT INTO usuarios 
+      (nome, email, senha_hash, celular, cpf, saldo, diamantes, vidas, xp, nivel)
+      VALUES ($1, $2, $3, $4, $5, 0, 0, 5, 0, 1)
+      RETURNING id, nome, email, saldo, diamantes, vidas, nivel
+    `;
+
+    const { rows } = await pool.query(query, [nome, email, senhaHash, celular, cpf]);
 
     res.status(201).json({ user: rows[0] });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro no cadastro' });
+
+  } catch (err) {
+    console.error('Erro no cadastro:', err);
+    res.status(500).json({ erro: 'Erro interno ao criar conta.' });
   }
 });
 
 /* ========================================================
-   LOGIN
+   2. LOGIN
 ======================================================== */
 app.post('/login', async (req, res) => {
   try {
     const { email, senha } = req.body;
-    const { rows } = await pool.query(
-      'SELECT * FROM usuarios WHERE email=$1',
-      [email]
-    );
-    if (!rows.length)
-      return res.status(401).json({ erro: 'Usuário não encontrado' });
+
+    const { rows } = await pool.query('SELECT * FROM usuarios WHERE email = $1', [email]);
+
+    if (rows.length === 0) {
+      return res.status(401).json({ erro: 'Usuário não encontrado.' });
+    }
 
     const user = rows[0];
-    const ok = await bcrypt.compare(senha, user.senha_hash);
-    if (!ok)
-      return res.status(401).json({ erro: 'Senha inválida' });
+    const senhaValida = await bcrypt.compare(senha, user.senha_hash);
+
+    if (!senhaValida) {
+      return res.status(401).json({ erro: 'Senha incorreta.' });
+    }
 
     res.json({
       user: {
@@ -94,160 +117,228 @@ app.post('/login', async (req, res) => {
         nivel: user.nivel
       }
     });
-  } catch {
-    res.status(500).json({ erro: 'Erro no login' });
+  } catch (err) {
+    console.error('Erro no login:', err);
+    res.status(500).json({ erro: 'Erro interno no login.' });
   }
 });
 
 /* ========================================================
-   SALDO
+   3. CONSULTAR SALDO
 ======================================================== */
 app.get('/saldo/:id', async (req, res) => {
-  const { rows } = await pool.query(
-    'SELECT saldo,diamantes,vidas,xp,nivel FROM usuarios WHERE id=$1',
-    [req.params.id]
-  );
-  if (!rows.length) return res.status(404).json({ erro: 'Usuário não existe' });
-  res.json(rows[0]);
+  try {
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      'SELECT saldo, diamantes, vidas, nivel, xp FROM usuarios WHERE id = $1',
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ erro: 'Usuário não encontrado.' });
+    }
+
+    res.json(rows[0]);
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao buscar saldo.' });
+  }
 });
 
 /* ========================================================
-   PERGUNTAS QUIZ
+   4. INICIAR JOGO (NOVO! - Desconta Vida)
+======================================================== */
+app.post('/jogo/inicio', async (req, res) => {
+  const { usuario_id, jogo } = req.body; // ex: { usuario_id: 1, jogo: "nave" }
+
+  try {
+    // Tenta descontar 1 vida APENAS SE vidas > 0
+    const result = await pool.query(
+      'UPDATE usuarios SET vidas = vidas - 1 WHERE id = $1 AND vidas > 0 RETURNING vidas',
+      [usuario_id]
+    );
+
+    // Se não retornou nada, é porque não tinha vidas ou usuário não existe
+    if (result.rows.length === 0) {
+        // Verifica se usuário existe só pra dar a msg certa
+        const check = await pool.query('SELECT id FROM usuarios WHERE id = $1', [usuario_id]);
+        if (check.rows.length === 0) return res.status(404).json({ erro: 'Usuário não existe.' });
+        
+        return res.status(403).json({ erro: 'Sem vidas para jogar! Espere recarregar.' });
+    }
+
+    // Sucesso: Retorna quantas vidas sobraram
+    res.json({ 
+        mensagem: 'Jogo iniciado! Boa sorte.', 
+        vidas_restantes: result.rows[0].vidas 
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ erro: 'Erro ao iniciar jogo.' });
+  }
+});
+
+/* ========================================================
+   5. SALVAR PONTUAÇÃO (FIM DO JOGO)
+======================================================== */
+app.post('/pontuacao', async (req, res) => {
+  const { usuario_id, jogo, pontos } = req.body;
+  const pontosNum = parseInt(pontos) || 0;
+  
+  // Exemplo: Ganha 1 diamante a cada 100 pontos
+  const diamantesGanhos = Math.floor(pontosNum / 100);
+
+  try {
+    await pool.query('BEGIN');
+
+    // 1. Registra no histórico
+    await pool.query(
+      'INSERT INTO historico_jogos (usuario_id, jogo, pontos) VALUES ($1, $2, $3)',
+      [usuario_id, jogo, pontosNum]
+    );
+
+    // 2. Dá os prêmios (Diamantes e XP)
+    await pool.query(
+      'UPDATE usuarios SET diamantes = diamantes + $1, xp = xp + $2 WHERE id = $3',
+      [diamantesGanhos, pontosNum, usuario_id]
+    );
+
+    await pool.query('COMMIT');
+    res.json({ mensagem: 'Pontuação registrada com sucesso!' });
+
+  } catch (err) {
+    await pool.query('ROLLBACK');
+    console.error('Erro ao salvar pontos:', err);
+    res.status(500).json({ erro: 'Erro ao processar pontuação.' });
+  }
+});
+
+/* ========================================================
+   6. BUSCAR PERGUNTAS (QUIZ)
 ======================================================== */
 app.get('/perguntas/:usuario_id/:categoria', async (req, res) => {
   const { usuario_id, categoria } = req.params;
 
-  const { rows } = await pool.query(`
-    SELECT id, pergunta AS q,
-    json_build_array(opcao_a,opcao_b,opcao_c,opcao_d) AS options,
-    resposta_correta AS answer
-    FROM perguntas
-    WHERE categoria=$1
-    AND id NOT IN (
-      SELECT pergunta_id FROM respostas_usuarios WHERE usuario_id=$2
-    )
-    ORDER BY RANDOM()
-    LIMIT 10
-  `, [categoria, usuario_id]);
+  try {
+    const query = `
+      SELECT id, pergunta AS q,
+      json_build_array(opcao_a, opcao_b, opcao_c, opcao_d) AS options,
+      resposta_correta AS answer
+      FROM perguntas
+      WHERE categoria = $1
+      AND id NOT IN (
+        SELECT pergunta_id FROM respostas_usuarios WHERE usuario_id = $2
+      )
+      ORDER BY RANDOM()
+      LIMIT 10
+    `;
 
-  if (!rows.length)
-    return res.status(404).json({ erro: 'Sem perguntas disponíveis' });
+    const { rows } = await pool.query(query, [categoria, usuario_id]);
 
-  res.json(rows);
+    if (rows.length === 0) {
+      return res.status(404).json({
+        erro: 'Você já zerou todas as perguntas desta categoria!'
+      });
+    }
+
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ erro: 'Erro ao carregar perguntas.' });
+  }
 });
 
 /* ========================================================
-   REGISTRAR RESPOSTA
+   7. REGISTRAR RESPOSTA DO QUIZ
 ======================================================== */
 app.post('/registrar-resposta', async (req, res) => {
   const { usuario_id, pergunta_id, acertou } = req.body;
-  await pool.query(
-    'INSERT INTO respostas_usuarios (usuario_id,pergunta_id,acertou) VALUES ($1,$2,$3)',
-    [usuario_id, pergunta_id, acertou]
-  );
-  res.json({ ok: true });
+
+  try {
+    await pool.query(
+      'INSERT INTO respostas_usuarios (usuario_id, pergunta_id, acertou) VALUES ($1, $2, $3)',
+      [usuario_id, pergunta_id, acertou]
+    );
+    res.json({ mensagem: 'Resposta salva!' });
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao salvar resposta.' });
+  }
 });
 
 /* ========================================================
-   TENTAR NOVAMENTE (NOVA PERGUNTA)
+   8. GASTAR DIAMANTES PARA REPETIR
 ======================================================== */
-app.get('/pergunta-extra/:usuario_id/:categoria', async (req, res) => {
-  const { usuario_id, categoria } = req.params;
+app.post('/quiz/repetir', async (req, res) => {
+  const { usuario_id } = req.body;
 
-  const saldo = await pool.query(
-    'SELECT diamantes FROM usuarios WHERE id=$1',
-    [usuario_id]
-  );
+  try {
+    const { rows } = await pool.query('SELECT diamantes FROM usuarios WHERE id = $1', [usuario_id]);
 
-  if (!saldo.rows.length || saldo.rows[0].diamantes < 10)
-    return res.status(400).json({ erro: 'Diamantes insuficientes' });
+    if (rows.length === 0) return res.status(404).json({ erro: 'Usuário sumiu.' });
 
-  await pool.query(
-    'UPDATE usuarios SET diamantes=diamantes-10 WHERE id=$1',
-    [usuario_id]
-  );
+    if (rows[0].diamantes < 10) {
+      return res.status(400).json({ erro: 'Saldo insuficiente (Precisa de 10 diamantes).' });
+    }
 
-  const { rows } = await pool.query(`
-    SELECT id, pergunta AS q,
-    json_build_array(opcao_a,opcao_b,opcao_c,opcao_d) AS options,
-    resposta_correta AS answer
-    FROM perguntas
-    WHERE categoria=$1
-    ORDER BY RANDOM()
-    LIMIT 1
-  `, [categoria]);
+    await pool.query('UPDATE usuarios SET diamantes = diamantes - 10 WHERE id = $1', [usuario_id]);
 
-  res.json(rows[0]);
+    res.json({ mensagem: 'Diamantes descontados. Pode repetir!' });
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro na transação de diamantes.' });
+  }
 });
 
 /* ========================================================
-   PRÊMIO DISPUTA
+   9. RANKING GLOBAL
 ======================================================== */
-app.post('/entrar-disputa', async (_, res) => {
-  await pool.query(`
-    UPDATE disputa_premio
-    SET total = total + 5,
-        participantes = participantes + 1
-    WHERE id = 1
-  `);
-  res.json({ ok: true });
-});
-
-app.get('/premio', async (_, res) => {
-  const { rows } = await pool.query(
-    'SELECT total, participantes FROM disputa_premio WHERE id=1'
-  );
-  res.json(rows[0]);
+app.get('/ranking', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT nome, xp, nivel, diamantes FROM usuarios ORDER BY xp DESC LIMIT 50'
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ erro: 'Erro ao carregar ranking.' });
+  }
 });
 
 /* ========================================================
-   RANKING
-======================================================== */
-app.get('/ranking', async (_, res) => {
-  const { rows } = await pool.query(
-    'SELECT nome,xp,nivel,diamantes FROM usuarios ORDER BY xp DESC LIMIT 50'
-  );
-  res.json(rows);
-});
-
-/* ========================================================
-   SAQUE PIX
+   10. SOLICITAR SAQUE PIX
 ======================================================== */
 app.post('/sacar', async (req, res) => {
   const { usuario_id, valor, chave_pix } = req.body;
 
   try {
+    const { rows } = await pool.query('SELECT saldo FROM usuarios WHERE id = $1', [usuario_id]);
+
+    if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado.' });
+
+    if (parseFloat(rows[0].saldo) < valor) {
+      return res.status(400).json({ erro: 'Saldo insuficiente.' });
+    }
+
     await pool.query('BEGIN');
 
-    const r = await pool.query(
-      'SELECT saldo FROM usuarios WHERE id=$1',
-      [usuario_id]
-    );
-    if (!r.rows.length || r.rows[0].saldo < valor)
-      throw new Error('Saldo insuficiente');
+    await pool.query('UPDATE usuarios SET saldo = saldo - $1 WHERE id = $2', [valor, usuario_id]);
 
     await pool.query(
-      'UPDATE usuarios SET saldo=saldo-$1 WHERE id=$2',
-      [valor, usuario_id]
-    );
-
-    await pool.query(
-      'INSERT INTO saques (usuario_id,valor,chave_pix,status) VALUES ($1,$2,$3,$4)',
+      'INSERT INTO saques (usuario_id, valor, chave_pix, status) VALUES ($1, $2, $3, $4)',
       [usuario_id, valor, chave_pix, 'em_analise']
     );
 
     await pool.query('COMMIT');
-    res.json({ mensagem: 'Saque solicitado' });
-  } catch (e) {
+    res.json({ mensagem: 'Saque solicitado com sucesso! Aguarde aprovação.' });
+
+  } catch (err) {
     await pool.query('ROLLBACK');
-    res.status(400).json({ erro: e.message });
+    res.status(500).json({ erro: 'Erro ao processar saque.' });
   }
 });
 
 /* ========================================================
-   START
+   INICIALIZAÇÃO DO SERVIDOR
 ======================================================== */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`🔥 Banked API rodando na porta ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`🔥 Servidor Banked rodando na porta ${PORT}`);
+});
